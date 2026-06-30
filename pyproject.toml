@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reestimate-file-generator"
+version = "1.0.0"
+description = "Generate reestimate model input files by replicating base loan records"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "openpyxl>=3.1.0",
+]
+
+[project.scripts]
+reestimate-generate = "reestimate_file_generator.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
