@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from pathlib import Path
 
 import openpyxl
 from openpyxl.workbook.workbook import Workbook
 
-from reestimate_file_generator.config import FILE_CONFIGS, PORTFOLIO_FILENAME, FileConfig
+from reestimate_file_generator.config import (
+    FILE_CONFIGS,
+    HISTORICAL_FILENAME,
+    HISTORICAL_OBLIGATION_COL_IDX,
+    HISTORICAL_SHEET,
+    PORTFOLIO_FILENAME,
+    FileConfig,
+)
 from reestimate_file_generator.id_generator import collect_existing_ids, generate_new_ids
 
 
@@ -99,6 +107,75 @@ def _clone_row(row: tuple, loan_col_idx: int, new_loan_id: str) -> tuple:
     return tuple(row_list)
 
 
+def _column_index(header: tuple, column_name: str) -> int | None:
+    for idx, value in enumerate(header):
+        if value == column_name:
+            return idx
+    return None
+
+
+def read_loan_amounts(input_dir: Path) -> dict[str, float]:
+    """Return the max historical obligation per loan, used as loan amount."""
+    path = input_dir / HISTORICAL_FILENAME
+    if not path.exists():
+        return {}
+
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    ws = wb[HISTORICAL_SHEET]
+    rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+
+    loan_amounts: dict[str, float] = {}
+    for row in rows[1:]:
+        if not row or len(row) <= HISTORICAL_OBLIGATION_COL_IDX:
+            continue
+        loan_id = row[0]
+        obligation = row[HISTORICAL_OBLIGATION_COL_IDX]
+        if loan_id is None or obligation is None:
+            continue
+        loan_key = str(loan_id)
+        amount = float(obligation)
+        loan_amounts[loan_key] = max(loan_amounts.get(loan_key, 0.0), amount)
+    return loan_amounts
+
+
+def _random_cancellation_amount(loan_amount: float, rng: random.Random) -> float:
+    if loan_amount <= 0:
+        return 0.0
+    if rng.random() >= 0.25:
+        return 0.0
+    fraction = rng.uniform(0.05, 0.85)
+    return round(loan_amount * fraction, 2)
+
+
+def _apply_random_cancellation_amounts(
+    header: tuple,
+    output_rows: list[tuple],
+    cfg: FileConfig,
+    loan_amounts: dict[str, float],
+    rng: random.Random,
+) -> list[tuple]:
+    if not cfg.cancellation_amount_col:
+        return output_rows
+
+    col_idx = _column_index(header, cfg.cancellation_amount_col)
+    if col_idx is None:
+        return output_rows
+
+    updated_rows: list[tuple] = []
+    for row in output_rows:
+        row_list = list(row)
+        while len(row_list) <= col_idx:
+            row_list.append(None)
+
+        loan_id = str(row_list[cfg.loan_col_idx])
+        loan_amount = loan_amounts.get(loan_id, 0.0)
+        row_list[col_idx] = _random_cancellation_amount(loan_amount, rng)
+        updated_rows.append(tuple(row_list))
+
+    return updated_rows
+
+
 def _write_output_file(
     cfg: FileConfig,
     header: tuple,
@@ -132,6 +209,12 @@ def generate_files(
     base_loan_ids = read_portfolio_loan_ids(input_dir)
     allowed_ids = set(base_loan_ids)
     assignments = build_assignments(base_loan_ids, count, input_dir)
+    loan_amounts = read_loan_amounts(input_dir)
+    output_loan_amounts = {
+        assignment.output_id: loan_amounts.get(assignment.source_id, 0.0)
+        for assignment in assignments
+    }
+    rng = random.Random()
 
     file_stats: dict[str, dict[str, int]] = {}
 
@@ -155,6 +238,15 @@ def generate_files(
                     output_rows.append(
                         _clone_row(row, cfg.loan_col_idx, assignment.output_id)
                     )
+
+        if cfg.cancellation_amount_col:
+            output_rows = _apply_random_cancellation_amounts(
+                header,
+                output_rows,
+                cfg,
+                output_loan_amounts,
+                rng,
+            )
 
         output_path = output_dir / cfg.filename
         _write_output_file(cfg, header, output_rows, output_path)
